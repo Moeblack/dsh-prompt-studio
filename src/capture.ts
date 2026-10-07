@@ -1,15 +1,26 @@
 /** Pure classification of actual request messages into Prompt Studio context rows. */
-import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, RequestMessage } from '@deepseek-ai/dsh-llm'
 import {
-  PROMPT_STUDIO_MESSAGE_SOURCE,
   type CapturedContextResource,
   type CapturedPromptComponent,
+  type PromptComponentRole,
   type RuntimeRequestLayout,
 } from './shared.ts'
 
 const CONVERSATION_SOURCE_KINDS = new Set(['user', 'model', 'tool'])
 
-function sourceRecord(message: Message): Record<string, unknown> {
+/**
+ * Request-message roles outside the editor's three-role model render as the
+ * user-role context they are; only an assistant message keeps its own role.
+ */
+function capturedRole(message: RequestMessage): PromptComponentRole {
+  if (message.role === 'assistant') return 'assistant'
+  return message.role === 'system' ? 'system' : 'user'
+}
+
+/** The producer metadata of one request message, or undefined for identity-free user input. */
+function sourceRecord(message: RequestMessage): Record<string, unknown> | undefined {
+  if (message.source === undefined) return undefined
   return structuredClone(message.source) as unknown as Record<string, unknown>
 }
 
@@ -21,7 +32,7 @@ function blockText(block: ContentBlock): string {
   return JSON.stringify(block, null, 2)
 }
 
-function renderMessageContent(message: Message): string {
+function renderMessageContent(message: RequestMessage): string {
   return message.content.map(blockText).join('\n\n')
 }
 
@@ -46,19 +57,19 @@ function instructionResources(source: Record<string, unknown>): CapturedContextR
   return resources
 }
 
-/** Whether a request message is producer-owned context rather than conversation. */
-export function isInjectedContextMessage(message: Message): boolean {
-  const source = message.source as unknown as Record<string, unknown>
+/** Whether one request message carries producer-owned context rather than conversation. */
+export function isInjectedContextMessage(message: RequestMessage): boolean {
+  const source = sourceRecord(message)
+  if (source === undefined) return false
   const kind = source['kind']
-  if (typeof kind !== 'string' || CONVERSATION_SOURCE_KINDS.has(kind)) return false
-  return !(kind === 'plugin' && source['plugin'] === PROMPT_STUDIO_MESSAGE_SOURCE)
+  return typeof kind === 'string' && !CONVERSATION_SOURCE_KINDS.has(kind)
 }
 
 /** Capture every producer-owned context message without knowing its plugin kind in advance. */
-export function captureInjectedMessages(messages: readonly Message[]): CapturedPromptComponent[] {
+export function captureInjectedMessages(messages: readonly RequestMessage[]): CapturedPromptComponent[] {
   return messages.flatMap((message, order): CapturedPromptComponent[] => {
-    if (!isInjectedContextMessage(message)) return []
     const source = sourceRecord(message)
+    if (source === undefined || !isInjectedContextMessage(message)) return []
     const sourceKind = String(source['kind'])
     const plugin = source['plugin']
     const form = source['form']
@@ -66,13 +77,13 @@ export function captureInjectedMessages(messages: readonly Message[]): CapturedP
     return [{
       id: `captured:${String(message.id)}`,
       kind: 'captured',
-      role: message.role,
+      role: capturedRole(message),
       order,
       enabled: true,
       template: renderMessageContent(message),
       messageId: String(message.id),
       sourceKind,
-      producer: sourceKind === 'plugin' && typeof plugin === 'string' ? plugin : sourceKind,
+      producer: typeof plugin === 'string' ? plugin : sourceKind,
       ...typeof form === 'string' ? { form } : {},
       ...typeof summary === 'string' ? { summary } : {},
       source,
@@ -82,11 +93,11 @@ export function captureInjectedMessages(messages: readonly Message[]): CapturedP
 }
 
 /** Describe the unmodified request gaps used by supplement placement. */
-export function requestLayout(messages: readonly Message[]): RuntimeRequestLayout {
+export function requestLayout(messages: readonly RequestMessage[]): RuntimeRequestLayout {
   let userAnchor: number | null = null
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]
-    if (message?.role === 'user' && message.source.kind === 'user') {
+    if (message?.role === 'user' && message.source?.kind === 'user') {
       userAnchor = index
       break
     }

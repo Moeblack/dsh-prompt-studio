@@ -1,5 +1,5 @@
-import { access, lstat, mkdir, readlink, rm, symlink } from 'node:fs/promises'
-import { dirname, join, relative, resolve } from 'node:path'
+import { access, copyFile, mkdir, readFile, rm } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 
@@ -17,65 +17,69 @@ async function requirePath(path, description) {
   }
 }
 
-async function ensureSymlink(path, target, ownedLinks) {
-  try {
-    const info = await lstat(path)
-    if (!info.isSymbolicLink()) throw new Error(`${path} exists and is not a symbolic link`)
-    const current = resolve(dirname(path), await readlink(path))
-    if (current !== resolve(target)) throw new Error(`${path} points to ${current}, expected ${target}`)
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error
-    await mkdir(dirname(path), { recursive: true })
-    await symlink(relative(dirname(path), target), path, 'dir')
-    ownedLinks.push(path)
+async function readPackageName() {
+  const manifest = JSON.parse(await readFile(join(pluginRoot, 'package.json'), 'utf8'))
+  if (typeof manifest.name !== 'string' || manifest.name.length === 0) {
+    throw new Error(`${join(pluginRoot, 'package.json')} does not declare a package name`)
+  }
+  return manifest.name
+}
+
+/**
+ * The DSH client-bundle preset resolves a package's manifest by globbing
+ * `packages/<group>/<package>/package.json` inside the DSH checkout, so an
+ * external plugin needs a manifest-only projection there for the duration of a
+ * build. Only the manifest is read; nothing is written back.
+ * @param dshRoot - DSH source checkout the build consumes.
+ * @param name - this plugin's package name.
+ * @returns the created group directory, removed again after the build.
+ */
+async function ensureManifestProjection(dshRoot, name) {
+  const group = join(dshRoot, 'packages', '_plugin-build')
+  const target = join(group, name)
+  await mkdir(target, { recursive: true })
+  await copyFile(join(pluginRoot, 'package.json'), join(target, 'package.json'))
+  return group
+}
+
+/** The JavaScript entry points behind the DSH checkout's `tsc` and `tsdown` bins. */
+export function dshToolEntryPoints(dshRoot) {
+  return {
+    tsc: join(dshRoot, 'node_modules/typescript/bin/tsc'),
+    tsdown: join(dshRoot, 'node_modules/tsdown/dist/run.mjs'),
   }
 }
 
-async function prepareLinks(dshRoot) {
-  const ownedLinks = []
-  const clientModules = join(dshRoot, 'packages/client/runtime/node_modules')
-  let removeNodeModules = false
-  try {
-    await lstat(join(pluginRoot, 'node_modules'))
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error
-    removeNodeModules = true
-  }
-  await ensureSymlink(join(pluginRoot, '.dsh'), dshRoot, ownedLinks)
-  await ensureSymlink(join(pluginRoot, 'node_modules/react'), join(clientModules, 'react'), ownedLinks)
-  await ensureSymlink(join(pluginRoot, 'node_modules/@deepseek-ai/schemastery'), join(dshRoot, 'vendor/schemastery'), ownedLinks)
-  await ensureSymlink(join(pluginRoot, 'node_modules/@deepseek-ai/cosmokit'), join(dshRoot, 'vendor/cosmokit'), ownedLinks)
-  await ensureSymlink(join(pluginRoot, 'node_modules/@types'), join(clientModules, '@types'), ownedLinks)
-  await ensureSymlink(join(pluginRoot, 'node_modules/vitest'), join(dshRoot, 'node_modules/vitest'), ownedLinks)
-  await ensureSymlink(
-    join(pluginRoot, 'node_modules/@testing-library'),
-    join(dshRoot, 'node_modules/@testing-library'),
-    ownedLinks,
-  )
-  return { ownedLinks, removeNodeModules }
-}
-
-async function removeOwnedLinks(ownedLinks, removeNodeModules) {
-  for (const path of ownedLinks.reverse()) await rm(path, { force: true })
-  if (removeNodeModules) await rm(join(pluginRoot, 'node_modules'), { recursive: true, force: true })
-}
-
+/**
+ * Prepare the DSH checkout for one build. No link is created into it: the
+ * client-bundle preset is imported through its real absolute path by
+ * `tsdown.config.ts`, and platform types come from this package's own
+ * dependencies, so the build needs no symlink or junction (and therefore no
+ * elevation on Windows).
+ */
 export async function withDshEnvironment(task) {
   const dshRoot = dshRootFromEnvironment()
   await requirePath(join(dshRoot, 'packages/client/tsdown.client.ts'), 'DSH client bundle preset')
-  await requirePath(join(dshRoot, 'node_modules/.bin/tsdown'), 'DSH tsdown executable')
-  await requirePath(join(dshRoot, 'node_modules/.bin/tsc'), 'DSH TypeScript executable')
-  const { ownedLinks, removeNodeModules } = await prepareLinks(dshRoot)
+  const tools = dshToolEntryPoints(dshRoot)
+  await requirePath(tools.tsdown, 'DSH tsdown executable')
+  await requirePath(tools.tsc, 'DSH TypeScript executable')
+  const projection = await ensureManifestProjection(dshRoot, await readPackageName())
   try {
-    return await task({ dshRoot, pluginRoot })
+    return await task({ dshRoot, pluginRoot, tools })
   } finally {
-    await removeOwnedLinks(ownedLinks, removeNodeModules)
+    await rm(projection, { recursive: true, force: true })
   }
 }
 
 export function run(command, args, cwd = pluginRoot) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd, stdio: 'inherit', env: process.env })
+    const child = spawn(command, args, {
+      cwd,
+      stdio: 'inherit',
+      env: process.versions.electron === undefined
+        ? process.env
+        : { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    })
     child.once('error', reject)
     child.once('exit', (code, signal) => {
       if (code === 0) {

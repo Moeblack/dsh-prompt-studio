@@ -1,8 +1,8 @@
 /** Unified prompt-component editor and request-layout preview. */
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { ConvViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import type { SnapshotSelectorHook } from '@deepseek-ai/dsh-client-web-react'
+import type { HostObservable, InjectFace, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import {
   DEFAULT_SUPPLEMENT_ORDER,
   buildDraftSystemComponents,
@@ -20,10 +20,14 @@ import {
 import type { PromptStudioState, PromptStudioStore } from './store.ts'
 import styles from './PromptStudioView.module.css'
 
-/** Business face supplied by the slot registration. */
+/**
+ * Registrant business face supplied by the slot registration. The reserved
+ * `hooks` compartment carries the bare snapshot source; the renderer binds it
+ * to the component's `useSnapshot` selector hook.
+ */
 export interface PromptStudioViewInjected {
   controller: PromptStudioStore
-  useSnapshot: SnapshotSelectorHook<PromptStudioState>
+  hooks: { snapshot: HostObservable<PromptStudioState> }
 }
 
 /** Full conversation-view props after the injected face is composed. */
@@ -268,7 +272,7 @@ function CapturedComponentCard({
 
 /** Conversation-view entry point. */
 export function PromptStudioView({ controller, useSnapshot, useSession }: PromptStudioViewProps): ReactNode {
-  const requestVersion = useSession(snapshot => `${String(snapshot.nodes.length)}:${snapshot.running ? 'running' : 'idle'}`)
+  const requestVersion = useSession(snapshot => `${String(snapshot.sessionId)}:${snapshot.running ? 'running' : 'idle'}:${snapshot.openState}`)
   useEffect(() => { void controller.load() }, [controller, requestVersion])
   return <PromptStudioSurface controller={controller} useSnapshot={useSnapshot} />
 }

@@ -19,9 +19,6 @@ export const DEFAULT_SUPPLEMENT_ORDER = 100
 /** Namespace reserved for ordered replacement markers owned by the Host half. */
 export const PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX = 'prompt-studio:override-marker:'
 
-/** Producer id used by Prompt Studio's own request-local messages. */
-export const PROMPT_STUDIO_MESSAGE_SOURCE = 'moeblack/prompt-studio'
-
 /** Runtime provenance is the only component-kind distinction. */
 export type PromptComponentKind = 'native' | 'supplement'
 

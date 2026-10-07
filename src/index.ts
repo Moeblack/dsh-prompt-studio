@@ -5,20 +5,18 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {
-  AssistantMessage,
   GenerateOptions,
-  Message,
-  MessageId,
+  RequestMessage,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import type { SettingsNamespace, SettingsScope } from '@deepseek-ai/dsh-settings'
-import type { Session, SessionId } from '@deepseek-ai/dsh-session'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {
   AssembledSection,
   AssembleContext,
   PromptAssembly,
 } from '@deepseek-ai/dsh-system-prompt'
-import { studioConfigSchema } from './config.ts'
+import { type Config as StudioRuntimeConfig } from './config.ts'
 import { captureInjectedMessages, requestLayout } from './capture.ts'
 import {
   CapturedResourceConflictError,
@@ -27,7 +25,6 @@ import {
   saveCapturedResource,
 } from './resource.ts'
 import {
-  PROMPT_STUDIO_MESSAGE_SOURCE,
   PROMPT_STUDIO_NAMESPACE,
   PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX,
   PROMPT_STUDIO_RESOURCE_PATH,
@@ -39,6 +36,7 @@ import {
   type CapturedPromptComponent,
   type NativeOverride,
   type PromptComponent,
+  type PromptComponentPosition,
   type PromptStudioSettingsSnapshot,
   type RuntimePromptCatalog,
   type StudioConfig,
@@ -71,9 +69,9 @@ export type {
   RuntimePromptCatalog,
   StudioConfig,
 } from './shared.ts'
-export { studioConfigSchema } from './config.ts'
+export { Config, studioConfigSchema } from './config.ts'
 
-/** Branded Host settings key. */
+/** Branded Host settings key: the profile entry id declared by `cordis.patch.yml`. */
 export const PROMPT_STUDIO_SETTINGS_NAMESPACE = PROMPT_STUDIO_NAMESPACE as SettingsNamespace
 
 /** Stable Cordis plugin name. */
@@ -83,6 +81,7 @@ export const name = 'client-ui-prompt-studio'
 export const inject = ['settings', 'systemPrompt', 'llm', 'sessions']
 
 const SYSTEM_SECTION_PREFIX = 'prompt-studio:supplement-section:'
+const SUPPLEMENT_CONTEXT_PREFIX = 'prompt-studio:supplement-context:'
 
 function markerName(target: string): string {
   return `${PROMPT_STUDIO_OVERRIDE_MARKER_PREFIX}${target}`
@@ -96,12 +95,38 @@ function cloneComponent(component: PromptComponent): PromptComponent {
   return { ...component }
 }
 
+/**
+ * Position bases for the runtime-context snapshot. DSH materializes every
+ * `systemPrompt.context()` contribution as one durable user-role context
+ * snapshot, so a message supplement's `position` selects its place in that
+ * ordered snapshot: `after_system` first, `anchored` and `tail` last.
+ */
+const SUPPLEMENT_POSITION_ORDER: Record<PromptComponentPosition, number> = {
+  after_system: -1000,
+  anchored: 0,
+  tail: 1000,
+}
+
+/**
+ * The runtime-context contribution of one enabled user/assistant supplement.
+ * DSH logs injected non-system content as producer-owned user-role context;
+ * a synthetic assistant turn is not a legal session event.
+ * @param component - the active message supplement.
+ * @returns the ordered context contribution.
+ */
+function supplementContext(component: PromptComponent): { name: string; order: number; text: string } {
+  return {
+    name: `${SUPPLEMENT_CONTEXT_PREFIX}${component.id}`,
+    order: SUPPLEMENT_POSITION_ORDER[component.position ?? 'tail'] + component.order,
+    text: renderSupplementBoundary(component.id, component.template),
+  }
+}
+
 /** Live values contributed by currently active configuration effects. */
 class RuntimeBindings {
   readonly ownedSectionNames = new Set<string>()
   readonly overridesByMarker = new Map<string, NativeOverride>()
   readonly systemBySection = new Map<string, PromptComponent>()
-  readonly supplements = new Map<string, PromptComponent>()
 
   /** Activate one component and return its composed inverse. */
   activate(ctx: Context, component: PromptComponent): () => void {
@@ -114,11 +139,8 @@ class RuntimeBindings {
         this.overridesByMarker.set(marker, snapshot)
         if (snapshot.enabled && snapshot.role === 'system') {
           this.systemBySection.set(marker, snapshot)
-        } else if (snapshot.enabled) {
-          this.supplements.set(snapshot.id, snapshot)
         }
         yield () => {
-          this.supplements.delete(snapshot.id)
           this.systemBySection.delete(marker)
           this.overridesByMarker.delete(marker)
           this.ownedSectionNames.delete(marker)
@@ -130,6 +152,9 @@ class RuntimeBindings {
             ? renderSupplementBoundary(snapshot.id, snapshot.template)
             : '',
         })
+        if (snapshot.enabled && snapshot.role !== 'system') {
+          yield ctx.systemPrompt.context(supplementContext(snapshot))
+        }
       }.bind(this), `prompt-studio: override ${snapshot.origin}`)
     }
     if (!component.enabled) return ctx.effect(() => () => undefined, `prompt-studio: disabled ${component.id}`)
@@ -150,10 +175,10 @@ class RuntimeBindings {
         })
       }.bind(this), `prompt-studio: system supplement ${component.id}`)
     }
-    return ctx.effect(function* (this: RuntimeBindings) {
-      this.supplements.set(snapshot.id, snapshot)
-      yield () => { this.supplements.delete(snapshot.id) }
-    }.bind(this), `prompt-studio: supplement ${component.id}`)
+    return ctx.effect(
+      () => ctx.systemPrompt.context(supplementContext(snapshot)),
+      `prompt-studio: supplement ${component.id}`,
+    )
   }
 }
 
@@ -264,7 +289,7 @@ class RuntimeCatalogStore {
     this.revision += 1
   }
 
-  commitRequest(sessionId: string, messages: readonly Message[]): void {
+  commitRequest(sessionId: string, messages: readonly RequestMessage[]): void {
     const next = {
       captured: captureInjectedMessages(messages),
       layout: requestLayout(messages),
@@ -302,73 +327,18 @@ class RuntimeCatalogStore {
   }
 }
 
+/** The last true user input in the derived history, for the `{{user_input}}` variable. */
 function latestUserInput(agent: Agent): string | undefined {
-  for (let index = agent.session.events.length - 1; index >= 0; index -= 1) {
-    const event = agent.session.events[index]
-    if (event?.type !== 'user/message') continue
-    return event.data.content
+  const messages = agent.session.deriveMessages()
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.role !== 'user') continue
+    return message.content
       .filter(block => block.type === 'text')
       .map(block => block.text)
       .join('\n')
   }
   return undefined
-}
-
-/** One seed turn folding all configured user/assistant supplements. */
-function injectionSeedTurn(components: readonly PromptComponent[]): {
-  userText: string
-  assistantText: string
-} | undefined {
-  const userText = components
-    .filter(component => component.role === 'user')
-    .map(component => renderSupplementBoundary(component.id, component.template))
-    .join('\n\n')
-  const assistantText = components
-    .filter(component => component.role === 'assistant')
-    .map(component => renderSupplementBoundary(component.id, component.template))
-    .join('\n\n')
-  if (userText.length === 0 && assistantText.length === 0) return undefined
-  return { userText, assistantText }
-}
-
-/**
- * Append the configured injection dialogue as the session seed turn (turn 0,
- * before the agent's first real turn). The user message carries a plain user
- * source so message-edit treats it as the turn's user input; the assistant
- * message keeps plugin provenance for tracing.
- */
-function appendInjectionTurn(session: Session, components: readonly PromptComponent[]): void {
-  const seed = injectionSeedTurn(components)
-  if (seed === undefined) return
-  const { userText, assistantText } = seed
-  const turn = 0
-  session.append('turn/start', { turn })
-  session.append('step/start', { turn, step: 1 })
-  if (userText.length > 0) {
-    session.append('user/message', {
-      id: crypto.randomUUID() as MessageId,
-      role: 'user',
-      content: [{ type: 'text', text: userText }],
-      source: { kind: 'user' },
-    }, { surfaceOp: 'append' })
-  }
-  if (assistantText.length > 0) {
-    session.append('assistant/message', {
-      turn,
-      step: 1,
-      message: {
-        id: crypto.randomUUID() as MessageId,
-        role: 'assistant',
-        content: [{ type: 'text', text: assistantText }],
-        // Plugin provenance kept for tracing; the wire accepts non-model
-        // sources at runtime (verified), the cast satisfies the model-source
-        // type contract of AssistantMessage.
-        source: { kind: 'plugin', plugin: PROMPT_STUDIO_MESSAGE_SOURCE },
-      } as unknown as AssistantMessage,
-    }, { surfaceOp: 'append' })
-  }
-  session.append('step/end', { turn, step: 1 })
-  session.append('turn/end', { turn, reason: { kind: 'completed' } })
 }
 
 function rewriteRequest(
@@ -390,6 +360,9 @@ function respondJson(response: ServerResponse, status: number, value: unknown, h
   response.end(head ? undefined : body)
 }
 
+/** One request body that is not valid JSON: a client error, never a server fault. */
+class RequestBodyError extends Error {}
+
 function requestJson(request: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
@@ -398,7 +371,9 @@ function requestJson(request: IncomingMessage): Promise<unknown> {
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown)
       } catch (error: unknown) {
-        reject(error)
+        reject(new RequestBodyError(
+          `请求体不是合法 JSON：${error instanceof Error ? error.message : String(error)}`,
+        ))
       }
     })
     request.on('error', reject)
@@ -468,16 +443,36 @@ function selectedResource(
   return { cwd: session.header.cwd ?? '.', resource }
 }
 
-function resourceErrorStatus(error: unknown): number {
-  if (error instanceof TypeError) return 400
+/**
+ * Whether one failure is the settings service's stale-revision refusal. The
+ * service documents `code` as the stable machine code for wire layers, which
+ * keeps this classification free of a runtime import of the service package
+ * inside the self-contained Node bundle.
+ * @param error - the value thrown by a settings write.
+ * @returns whether the write was refused because the revision had moved.
+ */
+function isSettingsConflict(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && Reflect.get(error, 'code') === 'SETTINGS_CONFLICT'
+}
+
+/**
+ * HTTP status for one request failure: malformed input is a client error,
+ * an absent referent is 404, a stale write is 409, anything else is a fault.
+ * @param error - the value thrown while serving one request.
+ * @returns the response status for that failure.
+ */
+function requestErrorStatus(error: unknown): number {
+  if (error instanceof RequestBodyError || error instanceof TypeError) return 400
   if (error instanceof CapturedResourceNotFoundError) return 404
-  if (error instanceof CapturedResourceConflictError) return 409
+  if (error instanceof CapturedResourceConflictError || isSettingsConflict(error)) return 409
   return 500
 }
 
 function settingsSnapshot(ctx: Context): PromptStudioSettingsSnapshot {
   const descriptor = ctx.settings.describe().find(row => row.ns === PROMPT_STUDIO_SETTINGS_NAMESPACE)
-  if (descriptor === undefined) throw new Error('prompt-studio settings namespace is not registered')
+  if (descriptor === undefined) {
+    throw new Error(`prompt-studio is not a configurable profile entry (expected entry id "${PROMPT_STUDIO_NAMESPACE}")`)
+  }
   const value = descriptor.value as StudioConfig
   return {
     writable: ctx.settings.writable,
@@ -538,7 +533,7 @@ function installRoutes(ctx: Context, catalog: RuntimeCatalogStore): void {
           response.end()
         } catch (error: unknown) {
           const message = error instanceof Error ? error.message : String(error)
-          respondJson(response, error instanceof TypeError ? 400 : 409, { error: message })
+          respondJson(response, requestErrorStatus(error), { error: message })
         }
       },
     }), 'prompt-studio: settings route')
@@ -569,23 +564,29 @@ function installRoutes(ctx: Context, catalog: RuntimeCatalogStore): void {
           response.end()
         } catch (error: unknown) {
           const message = error instanceof Error ? error.message : String(error)
-          respondJson(response, resourceErrorStatus(error), { error: message })
+          respondJson(response, requestErrorStatus(error), { error: message })
         }
       },
     }), 'prompt-studio: captured resource route')
   })
 }
 
-/** Register the live namespace and unified component pipeline. */
-export async function apply(ctx: Context): Promise<void> {
-  const scope: SettingsScope<StudioConfig> = ctx.settings.register(
-    PROMPT_STUDIO_SETTINGS_NAMESPACE,
-    studioConfigSchema,
-    { applies: 'live' },
-  )
+/**
+ * Register the plugin Config, its live component pipeline, and the routes.
+ * @param ctx - the plugin's Host context.
+ * @param config - the validated profile-entry Config; `components` is a live reference.
+ */
+export async function apply(ctx: Context, config: StudioRuntimeConfig): Promise<void> {
   const bindings = new RuntimeBindings()
   const pipeline = new ComponentPipeline(ctx, bindings)
   const catalog = new RuntimeCatalogStore()
+
+  /** Re-read the live component reference and rebuild the composed effect. */
+  const reconfigure = (): void => {
+    const components = config.components.get()
+    validatePromptComponents(components)
+    pipeline.replace(components)
+  }
 
   ctx.systemPrompt.variable('user_input', context => context.agent === undefined
     ? undefined
@@ -620,23 +621,21 @@ export async function apply(ctx: Context): Promise<void> {
 
   ctx.on('system-prompt/change', requestRefresh)
   ctx.on('llm/stream', (options, next) => rewriteRequest(catalog, options, next))
-  ctx.on('session/created', (session) => {
-    try {
-      appendInjectionTurn(session, [...bindings.supplements.values()])
-    } catch (error: unknown) {
-      ctx.logger.warn('prompt-studio: injection seed turn failed')
-      ctx.logger.warn(error)
-    }
-  }, { prepend: true })
   installRoutes(ctx, catalog)
 
-  const initial = scope.get()
-  validatePromptComponents(initial.components)
-  pipeline.replace(initial.components)
-  ctx.effect(() => scope.watch((next) => {
-    validatePromptComponents(next.components)
-    pipeline.replace(next.components)
-  }), 'prompt-studio: settings component source')
+  // A volatile Config field is edited in place, so the settings service reports
+  // the change instead of remounting this fiber; re-read the live reference.
+  ctx.on('settings/document-updated', (namespace) => {
+    if (namespace !== PROMPT_STUDIO_SETTINGS_NAMESPACE) return
+    try {
+      reconfigure()
+    } catch (error: unknown) {
+      ctx.logger.warn('prompt-studio: rejected an invalid component set')
+      ctx.logger.warn(error)
+    }
+  })
 
+  reconfigure()
   await ctx.systemPrompt.assemble()
 }
+

@@ -1,62 +1,43 @@
 {
-  "extends": "./.dsh/tsconfig.base.client.json",
   "compilerOptions": {
-    "rootDir": "src",
-    "outDir": "dist/types",
-    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo",
+    "target": "es2024",
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": [
+      "ES2024",
+      "DOM",
+      "DOM.Iterable",
+      "ESNext.Disposable"
+    ],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "verbatimModuleSyntax": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "declarationMap": false,
+    "sourceMap": false,
+    "composite": false,
+    "incremental": false,
+    "types": [
+      "node"
+    ],
     "typeRoots": [
-      "./.dsh/node_modules/@types",
       "./node_modules/@types"
-    ]
+    ],
+    "rootDir": "src",
+    "outDir": "lib/types"
   },
   "include": [
     "src"
-  ],
-  "references": [
-    {
-      "path": "./.dsh/vendor/cordis"
-    },
-    {
-      "path": "./.dsh/vendor/schemastery"
-    },
-    {
-      "path": "./.dsh/packages/core/system-prompt"
-    },
-    {
-      "path": "./.dsh/packages/core/agent"
-    },
-    {
-      "path": "./.dsh/packages/core/session"
-    },
-    {
-      "path": "./.dsh/packages/llm/llm"
-    },
-    {
-      "path": "./.dsh/packages/settings/settings"
-    },
-    {
-      "path": "./.dsh/packages/host/webserver"
-    },
-    {
-      "path": "./.dsh/packages/client/connection/tsconfig.client.json"
-    },
-    {
-      "path": "./.dsh/packages/client/runtime"
-    },
-    {
-      "path": "./.dsh/packages/client/ui-slots"
-    },
-    {
-      "path": "./.dsh/packages/client/web-react"
-    },
-    {
-      "path": "./.dsh/packages/client/ui-conversation"
-    },
-    {
-      "path": "./.dsh/packages/client/ui-settings"
-    },
-    {
-      "path": "./.dsh/packages/api/remotes/tsconfig.client.json"
-    }
   ]
 }

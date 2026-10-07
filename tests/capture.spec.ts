@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CallId, createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { captureInjectedMessages, isInjectedContextMessage, requestLayout } from '../src/capture.ts'
 
 describe('automatic injected-context capture', () => {
@@ -16,11 +16,11 @@ describe('automatic injected-context capture', () => {
     })
     const futurePlugin = createUserMessage({
       content: [{ type: 'text', text: 'Future catalog' }],
-      source: { kind: 'plugin', plugin: 'future-context', form: 'catalog' },
+      source: { kind: 'catalog', plugin: 'future-context', form: 'catalog' },
     })
     const tool = createUserMessage({
-      content: [{ type: 'tool-result', toolCallId: CallId('call-1'), content: [], isError: false }],
-      source: { kind: 'tool', callId: CallId('call-1') },
+      content: [{ type: 'tool-result', toolCallId: ToolCallId('call-1'), content: [], isError: false }],
+      source: { kind: 'tool', callId: ToolCallId('call-1') },
     })
     const model = createMessage({
       role: 'assistant',
@@ -49,13 +49,24 @@ describe('automatic injected-context capture', () => {
     ])
   })
 
-  it('excludes Prompt Studio request-local messages and records the real-user anchor', () => {
+  it('treats unknown producer kinds as captured context and keeps the real-user anchor', () => {
     const injected = createUserMessage({
       content: [{ type: 'text', text: 'own' }],
-      source: { kind: 'plugin', plugin: 'moeblack/prompt-studio' },
+      source: { kind: 'unknown-producer', plugin: 'some-plugin' },
     })
     const user = createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
-    expect(captureInjectedMessages([injected, user])).toEqual([])
+    expect(captureInjectedMessages([injected, user])).toMatchObject([
+      { order: 0, sourceKind: 'unknown-producer', producer: 'some-plugin' },
+    ])
     expect(requestLayout([injected, user])).toEqual({ messageCount: 2, userAnchor: 1 })
+  })
+
+  it('maps producer roles onto the editor role model', () => {
+    const developer = createMessage({
+      role: 'developer',
+      content: [{ type: 'text', text: 'Tool added' }],
+      source: { kind: 'developer', form: 'catalog' },
+    })
+    expect(captureInjectedMessages([developer])).toMatchObject([{ role: 'user', producer: 'developer' }])
   })
 })

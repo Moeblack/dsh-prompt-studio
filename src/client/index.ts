@@ -1,9 +1,11 @@
 /** Prompt Studio browser half: one live conversation-view contribution. */
-import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-web-react'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
+import type {} from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import {
   PROMPT_STUDIO_NAMESPACE,
   PROMPT_STUDIO_VIEW_ORDER,
@@ -18,18 +20,18 @@ import {
 export type { PromptStudioState } from './store.ts'
 export type { PromptStudioViewInjected, PromptStudioViewProps } from './PromptStudioView.tsx'
 
-/** Slot registry, declaration-order edge, and settings transport. */
+/** Cordis services read by the registrations and the pushed invalidations. */
 export const inject = ['slots', 'conversation', 'connection', 'remote']
 
 /** Register the tab, its shared controller, and pushed invalidations. */
 export function apply(ctx: ClientContext): void {
   const faces = new Map<string, PromptStudioViewInjected>()
-  const faceFor = (sessionId?: SessionId): PromptStudioViewInjected => {
-    const key = sessionId === undefined ? '' : String(sessionId)
+  const faceFor = (sessionId?: string): PromptStudioViewInjected => {
+    const key = sessionId ?? ''
     let face = faces.get(key)
     if (face !== undefined) return face
     const controller = new PromptStudioStore(key.length === 0 ? undefined : key)
-    face = { controller, useSnapshot: bindSnapshotSelector(controller.store) }
+    face = { controller, hooks: { snapshot: controller.store } }
     faces.set(key, face)
     return face
   }
@@ -50,15 +52,15 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.register({
     name: 'conversation.view',
     id: 'prompt-studio',
-      order: PROMPT_STUDIO_VIEW_ORDER,
-      label: 'Prompt Studio',
-      inject: (sessionId: SessionId) => faceFor(sessionId),
+    order: PROMPT_STUDIO_VIEW_ORDER,
+    label: 'Prompt Studio',
+    inject: (sessionId: string) => faceFor(sessionId),
   }, PromptStudioView)
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: 'prompt-studio',
-      order: PROMPT_STUDIO_VIEW_ORDER,
-      label: 'Prompt Studio',
-      inject: () => faceFor(),
+    order: PROMPT_STUDIO_VIEW_ORDER,
+    label: 'Prompt Studio',
+    inject: () => faceFor(),
   }, PromptStudioSettingsSection))
 }

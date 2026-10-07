@@ -1,6 +1,6 @@
 /** Browser controller for the prompt-studio settings and runtime inventory. */
-import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
-import { createSnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import {
   PROMPT_STUDIO_RESOURCE_PATH,
   PROMPT_STUDIO_SETTINGS_PATH,

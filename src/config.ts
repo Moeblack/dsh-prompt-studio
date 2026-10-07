@@ -1,11 +1,11 @@
 import z from '@deepseek-ai/schemastery'
+import type { Volatile } from '@deepseek-ai/cordis'
 import {
   validatePromptComponents,
   type PromptComponent,
   type PromptComponentKind,
   type PromptComponentPosition,
   type PromptComponentRole,
-  type StudioConfig,
 } from './shared.ts'
 
 const finiteOrder = z.transform(z.number(), (value) => {
@@ -59,7 +59,20 @@ const uniqueComponents = z.transform(z.array(componentSchema), (components) => {
   return normalized
 }, true)
 
+/** Validated plugin Config: only user-authored supplements are stored, as a live field. */
+export interface Config {
+  components: Volatile<PromptComponent[]>
+}
+
+/**
+ * Plugin Config schema. `components` is volatile so the settings service can
+ * edit the list in place and the running pipeline re-reads it without
+ * remounting the plugin fiber.
+ */
+export const Config = z.object({
+  components: uniqueComponents.default([]).volatile(),
+})
+
 /** Persisted settings schema. Only user-authored supplements are stored. */
-export const studioConfigSchema = z.object({
-  components: uniqueComponents.default([]),
-}) as z<StudioConfig>
+export const studioConfigSchema = Config
+
